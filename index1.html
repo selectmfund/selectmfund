@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Download Mutual Fund NAV Data</title>
+    <style>
+        #progressWrapper {
+            width: 100%;
+            background-color: #f3f3f3;
+            margin: 20px 0;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+
+        #progressBar {
+            width: 0%;
+            height: 30px;
+            background-color: #4caf50;
+            text-align: center;
+            color: white;
+            line-height: 30px;
+        }
+
+        #progressText, #fileSizeText, #estimatedTimeText, #estimatedFileSizeText {
+            margin-top: 10px;
+            font-size: 16px;
+        }
+
+        #locationText {
+            margin-top: 20px;
+            font-size: 16px;
+            color: blue;
+            display: none;
+        }
+
+        #downloadedData {
+            margin-top: 20px;
+            font-size: 14px;
+            border: 1px solid #ddd;
+            padding: 10px;
+            max-height: 300px;
+            overflow-y: scroll;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <h1>Download Mutual Fund NAV Data</h1>
+    <button id="downloadButton">Download NAV Data</button>
+
+    <!-- Progress bar section -->
+    <div id="progressWrapper">
+        <div id="progressBar">0%</div>
+    </div>
+    <div id="progressText">Progress: 0 of 0</div>
+    <div id="fileSizeText">File size: 0 KB</div>
+    <div id="estimatedTimeText">Estimated time remaining: calculating...</div>
+    <div id="estimatedFileSizeText">Estimated final file size: calculating...</div>
+    <div id="locationText">Your file has been downloaded to your default downloads folder.</div>
+
+    <!-- Displaying downloaded data in real-time -->
+    <div id="downloadedData"></div>
+
+    <script>
+        // Function to format file size appropriately (KB, MB, GB)
+        function formatFileSize(sizeInBytes) {
+            if (sizeInBytes >= 1024 * 1024 * 1024) {
+                return (sizeInBytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+            } else if (sizeInBytes >= 1024 * 1024) {
+                return (sizeInBytes / (1024 * 1024)).toFixed(2) + ' MB';
+            } else {
+                return (sizeInBytes / 1024).toFixed(2) + ' KB';
+            }
+        }
+
+        // Function to calculate estimated time remaining
+        function formatTime(seconds) {
+            const minutes = Math.floor(seconds / 60);
+            const remainingSeconds = seconds % 60;
+            if (minutes > 0) {
+                return `${minutes} min ${remainingSeconds} sec`;
+            } else {
+                return `${remainingSeconds} sec`;
+            }
+        }
+
+        // Function to download the JSON file
+        function downloadFile(data, filename) {
+            const file = new Blob([data], { type: 'application/json' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(file);
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+
+            // Show download location info
+            document.getElementById('locationText').style.display = 'block';
+        }
+
+        // Fetch data from the main mutual funds list
+        async function fetchMutualFundsList() {
+            const response = await fetch('https://api.mfapi.in/mf');
+            return await response.json();
+        }
+
+        // Fetch historical NAV for a specific mutual fund with retry logic
+        async function fetchMutualFundNAV(fundId, retries = 3) {
+            let attempt = 0;
+            while (attempt < retries) {
+                try {
+                    const response = await fetch(`https://api.mfapi.in/mf/${fundId}`);
+                    if (!response.ok) {
+                        throw new Error(`Failed to fetch NAV for fund ${fundId}: ${response.status}`);
+                    }
+                    return await response.json();
+                } catch (error) {
+                    console.error(`Attempt ${attempt + 1} failed for fund ${fundId}`, error);
+                    attempt++;
+                    if (attempt === retries) {
+                        console.error(`Skipping fund ${fundId} after ${retries} retries.`);
+                        return null;
+                    }
+                }
+            }
+        }
+
+        // Utility to limit concurrency (control number of parallel requests)
+        async function fetchWithConcurrencyLimit(limit, items, fetchFn) {
+            const results = [];
+            const queue = [];
+
+            for (let i = 0; i < items.length; i++) {
+                const promise = fetchFn(items[i]).then(result => {
+                    results[i] = result;
+                });
+
+                queue.push(promise);
+
+                if (queue.length >= limit) {
+                    await Promise.race(queue); // Wait for the fastest promise to resolve
+                    queue.splice(queue.findIndex(p => p === promise), 1);
+                }
+            }
+
+            await Promise.all(queue); // Wait for all remaining promises
+            return results;
+        }
+
+        // Update the progress bar, progress text, file size, estimated time, and estimated file size
+        function updateProgress(current, total, fileSize, timeElapsed, estimatedTotalSize, downloadedData) {
+            const progress = (current / total) * 100;
+            const progressBar = document.getElementById('progressBar');
+            const progressText = document.getElementById('progressText');
+            const fileSizeText = document.getElementById('fileSizeText');
+            const estimatedTimeText = document.getElementById('estimatedTimeText');
+            const estimatedFileSizeText = document.getElementById('estimatedFileSizeText');
+            const downloadedDataDiv = document.getElementById('downloadedData');
+
+            progressBar.style.width = progress + '%';
+            progressBar.innerText = Math.floor(progress) + '%';
+            progressText.innerText = `Progress: ${current} of ${total}`;
+            fileSizeText.innerText = `File size: ${formatFileSize(fileSize)}`;
+            
+            const timePerFund = timeElapsed / current;
+            const estimatedRemainingTime = timePerFund * (total - current);
+            estimatedTimeText.innerText = `Estimated time remaining: ${formatTime(Math.round(estimatedRemainingTime))}`;
+
+            estimatedFileSizeText.innerText = `Estimated final file size: ${formatFileSize(estimatedTotalSize)}`;
+
+            // Update downloaded data in the UI
+            downloadedDataDiv.innerText = downloadedData;
+        }
+
+        document.getElementById('downloadButton').addEventListener('click', async () => {
+            try {
+                const mutualFundsList = await fetchMutualFundsList();
+                const totalFunds = mutualFundsList.length;
+                let allNAVData = {};
+                let accumulatedSize = 0;
+                const startTime = Date.now();
+                const concurrencyLimit = 5; // Fetch up to 5 funds in parallel
+
+                // Initialize progress
+                updateProgress(0, totalFunds, accumulatedSize, 0, 0, '');
+
+                // Fetch all NAV data with concurrency limit
+                const fetchNavData = async (fund) => {
+                    const navData = await fetchMutualFundNAV(fund.schemeCode);
+                    if (navData) {
+                        allNAVData[fund.schemeCode] = navData;
+
+                        // Estimate the size of the accumulated data
+                        const currentDataSize = new Blob([JSON.stringify(navData)]).size;
+                        accumulatedSize += currentDataSize;
+
+                        // Estimate final file size
+                        const estimatedTotalSize = (accumulatedSize / (Object.keys(allNAVData).length)) * totalFunds;
+
+                        // Calculate time elapsed
+                        const timeElapsed = (Date.now() - startTime) / 1000;
+
+                        // Convert the current data to a string for display
+                        const currentDataString = JSON.stringify(navData, null, 2);
+
+                        // Update progress
+                        updateProgress(Object.keys(allNAVData).length, totalFunds, accumulatedSize, timeElapsed, estimatedTotalSize, currentDataString);
+                    }
+                };
+
+                await fetchWithConcurrencyLimit(concurrencyLimit, mutualFundsList, fetchNavData);
+
+                // Convert data to JSON string
+                const navDataJson = JSON.stringify(allNAVData, null, 2);
+                
+                // Ensure download occurs after all data is fetched
+                if (Object.keys(allNAVData).length > 0) {
+                    downloadFile(navDataJson, 'mutual_funds_nav_data.json');
+                } else {
+                    alert('No data was fetched!');
+                }
+
+            } catch (error) {
+                console.error('Error during the process:', error);
+                alert('An error occurred while fetching NAV data.');
+            }
+        });
+    </script>
+</body>
+</html>
